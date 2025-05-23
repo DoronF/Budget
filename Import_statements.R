@@ -1,23 +1,9 @@
-# Required libraries
-library(DBI)
-library(RSQLite)
-library(dplyr)
-library(stringr)
-library(pdftools)
-library(tabulapdf)
-library(fs)
-library(digest)
+
 
 # source
 source("extract_visa_transactions.R")
 source("extract_chequing_transactions.R")
-# --- Config ---
-import_dir <- "~/Documents/Budget/import"
-target_dir <- "~/Documents/Budget/statements"
-db_path <- "~/Documents/Budget/data/budget.db"
 
-# --- Database Connection  ---
-con <- dbConnect(SQLite(), db_path)
 # Ensure the database connection is closed when the script exits
 on.exit({
     if (dbIsValid(con)) {
@@ -32,7 +18,7 @@ on.exit({
 #'
 #' @param con A DBI connection object.
 initialize_database <- function(con) {
-    cat("Ensuring database tables exist and prepopulating initial data...\n")
+    cat(blue("Ensuring database tables exist and prepopulating initial data...\n"))
     
     # Create tables
     dbExecute(
@@ -83,7 +69,7 @@ initialize_database <- function(con) {
     existing_accounts_count <- dbGetQuery(con, "SELECT COUNT(*) AS count FROM accounts")$count
     if (existing_accounts_count == 0) {
         account_names <- c("Chequing", "Saving", "Simplii Visa", "CIBC Visa")
-        cat("Adding default accounts...\n")
+        cat(blue("Adding default accounts...\n"))
         for (acct in account_names) {
             dbExecute(
                 con,
@@ -163,13 +149,14 @@ is_pdf_processed <- function(con, file_path) {
 #'
 #' @param file_path The path to the PDF file.
 preview_pdf <- function(file_path) {
-    cat("\n--- Previewing PDF:", basename(file_path), "---\n")
+    cat(blue("\n--- Previewing PDF:", basename(file_path), "---\n"))
     preview <- tryCatch(
         pdf_text(file_path)[1],
         error = function(e)
             "Could not read PDF."
     )
-    cat(substr(preview, 1, 1000), "\n--- End of Preview ---\n")
+    cat(red(preview))
+    cat(blue("----------------------------------\n"))
 }
 
 #' Prompts the user to select an account.
@@ -178,7 +165,7 @@ preview_pdf <- function(file_path) {
 #' @return The selected account ID.
 select_account <- function(con) {
     accounts <- dbGetQuery(con, "SELECT * FROM accounts")
-    cat("\nSelect account:\n")
+    cat(blue("\nSelect account:\n"))
     for (j in seq_len(nrow(accounts))) {
         cat(sprintf(
             "%d: %s\n",
@@ -224,7 +211,7 @@ interactively_categorize_transactions <- function(df, default_categories, con) {
         row <- df[i, ]
         category_id <- NA # Ensure this is always initialized for each row
         
-        cat("\n--- Categorizing Transaction ---")
+        cat(blue("\n--- Categorizing Transaction ---"))
         cat(sprintf(
             "\nTransaction %d of %d: %s",
             i,
@@ -240,9 +227,9 @@ interactively_categorize_transactions <- function(df, default_categories, con) {
                 else
                     row$FundsIn,
                 if (!is.na(row$FundsOut))
-                    "OUT"
+                    red("OUT")
                 else
-                    "IN"
+                    green("IN")
             )
         )
         
@@ -254,13 +241,15 @@ interactively_categorize_transactions <- function(df, default_categories, con) {
             prev_cat_id <- existing_cat_result[1, 1]
             prev_cat_id <- as.integer(prev_cat_id)
             prev_cat_name <- default_categories$category_name[default_categories$category_id == prev_cat_id]
-            cat(
+            cat(blue(
                 sprintf(
                     "Previously categorized as: %s (ID: %d)\n",
                     prev_cat_name,
                     prev_cat_id
                 )
+                )
             )
+            cat(blue("----------------------------------\n"))
             input <- readline("Confirm this category? (y/n/skip): ")
             input <- tolower(trimws(input))
             
@@ -291,12 +280,14 @@ interactively_categorize_transactions <- function(df, default_categories, con) {
                     }
                     cat(left, right, "\n")
                 }
+                cat(blue("----------------------------------\n"))
                 
-                input_cat <- suppressWarnings(as.integer(
-                    readline(
-                        "Enter a number for the category (or press Enter to skip): "
-                    )
-                ))
+                input_cat <- suppressWarnings(
+                                as.integer(
+                                    readline(
+                    "Enter a number for the category (or press Enter to skip): "
+                                            )
+                                        ))
                 if (is.na(input_cat)) {
                     category_id <- as.integer(NA)
                     break
@@ -304,7 +295,7 @@ interactively_categorize_transactions <- function(df, default_categories, con) {
                     category_id <- input_cat
                     break
                 } else {
-                    cat("Invalid category. Please try again.\n")
+                    cat(red("Invalid category. Please try again.\n"))
                 }
             }
         }
@@ -358,6 +349,7 @@ save_processed_data <- function(con,
         transactions_df <- transactions_df %>%
             mutate(file_name = basename(new_file_path))
         print(transactions_df)
+        cat(blue("----------------------------------\n"))
         confirm <- readline("Save to database? (y/n): ")
         if (tolower(confirm) == "y") {
             dbWriteTable(con, "transactions", transactions_df, append = TRUE)
@@ -365,7 +357,7 @@ save_processed_data <- function(con,
             
             # Move file after successful save
             file_move(original_file_path, new_file_path)
-            cat("Moved to:", new_file_path, "\n")
+            cat(green("Moved to:", new_file_path, "\n"))
             
             # Mark as processed
             dbExecute(
@@ -403,26 +395,26 @@ run_pdf_import_workflow <- function() {
         pdf_files <- get_pdf_files(import_dir)
         
         if (length(pdf_files) == 0) {
-            cat("No PDF files found in import folder. Exiting.\n")
+            cat(red("No PDF files found in import folder. Exiting.\n"))
             break
         }
         
-        cat("\n--- PDF Files Available for Import ---\n")
+        cat(blue("\n--- PDF Files Available for Import ---\n"))
         for (i in seq_along(pdf_files)) {
             cat(sprintf("%2d: %s\n", i, basename(pdf_files[i])))
         }
         cat(" 0: Exit\n")
-        
+        cat(blue("----------------------------------\n"))
         selection <- suppressWarnings(as.integer(readline(
             "Select a file to import (0 to exit): "
         )))
         if (is.na(selection) || selection == 0) {
-            cat("Exiting import tool.\n")
+            cat(blue("Exiting import tool.\n"))
             
             break
         }
         if (!(selection %in% seq_along(pdf_files))) {
-            cat("Invalid selection. Try again.\n")
+            cat(red("Invalid selection. Try again.\n"))
             next
         }
         
@@ -430,12 +422,13 @@ run_pdf_import_workflow <- function() {
         
         # Check if file has already been processed by hash
         if (is_pdf_processed(con, file_path)) {
-            cat("File already imported. Skipping.\n")
+            cat(red("File already imported. Skipping.\n"))
             next
         }
         
         # Preview and confirm
         preview_pdf(file_path)
+        
         confirm_import <- readline("Do you want to import this file? (y/n): ")
         if (tolower(confirm_import) != "y") {
             next
@@ -468,13 +461,13 @@ run_pdf_import_workflow <- function() {
             #  Visa
             transactions_df <- extract_visa_transactions(file_path, year)
         } else {
-            cat("Extraction logic not implemented for this account type yet. Skipping.\n")
+            cat(yellow("Extraction logic not implemented for this account type yet. Skipping.\n"))
             next
         }
         
         if (is.null(transactions_df) ||
             nrow(transactions_df) == 0) {
-            cat("No transactions extracted. Skipping file.\n")
+            cat(yellow("No transactions extracted. Skipping file.\n"))
             next
         }
         
@@ -487,7 +480,7 @@ run_pdf_import_workflow <- function() {
         # --- Review and Correction Loop ---
         review_loop_active <- TRUE
         while (review_loop_active) {
-            cat("\n--- Review Categorized Transactions ---\n")
+            cat(blue("\n--- Review Categorized Transactions ---\n"))
             # Display current categorization for review
             review_display <- categorized_transactions %>%
                 left_join(default_categories, by = "category_id") %>%
@@ -523,15 +516,15 @@ run_pdf_import_workflow <- function() {
             
             # --- Logic for conditional saving option ---
             has_uncategorized <- any(is.na(categorized_transactions$category_id))
-            
-            cat("\nOptions:")
+            cat(blue("----------------------------------\n"))
+            cat(blue("\nOptions:"))
             if (!has_uncategorized) {
-                cat("\n  's' to save and proceed")
+                cat(blue("\n  's' to save and proceed"))
             } else {
-                cat("\n  (Saving is disabled until all transactions are categorized)")
+                cat(blue("\n  (Saving is disabled until all transactions are categorized)"))
             }
-            cat("\n  'r' to re-categorize a specific transaction")
-            cat("\n  'q' to quit without saving (skip this file)")
+            cat(blue("\n  'r' to re-categorize a specific transaction"))
+            cat(blue("\n  'q' to quit without saving (skip this file)"))
             
             # Adjust prompt based on whether saving is an option
             prompt_choices <- if (has_uncategorized)
@@ -600,7 +593,7 @@ run_pdf_import_workflow <- function() {
                     }
                     cat(left, right, "\n")
                 }
-                
+                cat(blue("----------------------------------\n"))
                 new_cat_id <- suppressWarnings(as.integer(readline("Enter new category ID: ")))
                 if (is.na(new_cat_id) ||
                     !(new_cat_id %in% default_categories$category_id)) {
@@ -618,7 +611,7 @@ run_pdf_import_workflow <- function() {
                     ))
                 }
             } else if (review_choice == "q") {
-                cat("Skipping this file and returning to main menu.\n")
+                cat(yellow("Skipping this file and returning to main menu.\n"))
                 review_loop_active <- FALSE # Exit loop
                 # Ensure we skip the saving part outside this loop as well
             } else {
@@ -653,8 +646,3 @@ run_pdf_import_workflow <- function() {
     }
 }
 
-# --- Run the workflow ---
-run_pdf_import_workflow()
-
-# --- Disconnect from DB ---
-dbDisconnect(con)

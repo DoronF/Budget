@@ -1,7 +1,4 @@
-library(pdftools)
-library(dplyr)
-library(stringr)
-library(lubridate)
+
 
 extract_visa_transactions <- function(file_path, year) {
     all_transactions <- list()
