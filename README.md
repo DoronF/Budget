@@ -116,3 +116,35 @@ The SQLite database (`budget.db`) will contain the following tables:
     - `month` (INTEGER)
     - `processed_at` (TEXT): Timestamp of processing.
     - `hash` (TEXT UNIQUE): SHA-256 hash of the original PDF content.
+      
+### Flowchart: PDF Statement Import Workflow
+
+```mermaid
+graph TD
+    A[Start Workflow] --> B{Initialize Database & Load Categories};
+    B --> C{Get PDF Files from Import Directory};
+    C --> D{Any new PDFs?};
+    D -- No --> E[Exit Workflow];
+    D -- Yes --> F{Display Available PDFs & Prompt User Selection};
+    F --> G{User Selects PDF or Exits};
+    G -- "Exits" --> E;
+    G -- "Selects PDF" --> H{Check if PDF Hash is Already Processed};
+    H -- "Yes (Already Processed)" --> F;
+    H -- "No (New PDF)" --> I{Preview PDF & Confirm Import};
+    I -- "User Declines" --> F;
+    I -- "User Confirms" --> J{Prompt User for Account Type, Year, Month};
+    J --> K{Generate New File Path for Processed PDF};
+    K --> L{Extract Transactions from PDF based on Account Type};
+    L -- "No Transactions Extracted" --> F;
+    L -- "Transactions Extracted" --> M{Interactively Categorize Transactions};
+    M --> N{Review Categorized Transactions};
+    N -- "All Categorized & User Confirms Save" --> O{Remove Temp IDs from Transactions};
+    N -- "User Wants to Re-categorize" --> P{Select Transaction to Re-categorize};
+    P --> Q{Re-categorize Selected Transaction};
+    Q --> N;
+    N -- "User Quits (Skip File)" --> F;
+    O --> R{Save Transactions to Database};
+    R --> S{Move Original PDF to New Path};
+    S --> T{Mark File as Processed in Database store hash};
+    T --> F;
+```
