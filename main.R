@@ -13,12 +13,13 @@ library(crayon)
 # --- Config ---
 import_dir <- "~/Documents/Budget/import"
 target_dir <- "~/Documents/Budget/statements"
-db_path <- "~/Documents/Budget/data/budget.db"
+db_path <- "~/Documents/Budget/data/budget1.db"
 
 # --- Database Connection  ---
 con <- dbConnect(SQLite(), db_path)
 
 source("Import_statements.R")
+source("edit_transactions.R")
 
 # --- Main Menu Function ---
 show_main_menu <- function() {
@@ -50,7 +51,8 @@ while (main_loop_active) {
             cat(green("\ne-Statement Import Workflow Finished. Returning to main menu.\n"))
         },
         "2" = {
-            cat(yellow("\nEdit Transactions: This feature is not yet implemented.\n"))
+            edit_transactions(con)
+            #cat(yellow("\nEdit Transactions: This feature is not yet implemented.\n"))
             # You would call a function like edit_transactions(con) here
         },
         "3" = {
