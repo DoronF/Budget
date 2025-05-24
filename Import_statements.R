@@ -102,7 +102,7 @@ initialize_database <- function(con) {
             "saving",
             "investing",
             "Credit",
-            "Phone",
+            "Taxes",
             "Intrest"
         ),
         stringsAsFactors = FALSE
@@ -348,7 +348,7 @@ save_processed_data <- function(con,
     if (nrow(transactions_df) > 0) {
         transactions_df <- transactions_df %>%
             mutate(file_name = basename(new_file_path))
-        print(transactions_df)
+        print(transactions_df, n = nrow(transactions_df))
         cat(blue("----------------------------------\n"))
         confirm <- readline("Save to database? (y/n): ")
         if (tolower(confirm) == "y") {
@@ -512,7 +512,7 @@ run_pdf_import_workflow <- function() {
                        "Cat ID")
             
             # Use n = -1 for tibbles for more robust full printing
-            print(dplyr::as_tibble(review_display), n = -1)
+            print(dplyr::as_tibble(review_display), n = -1 )
             
             # --- Logic for conditional saving option ---
             has_uncategorized <- any(is.na(categorized_transactions$category_id))

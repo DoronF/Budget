@@ -13,7 +13,8 @@ library(crayon)
 # --- Config ---
 import_dir <- "~/Documents/Budget/import"
 target_dir <- "~/Documents/Budget/statements"
-db_path <- "~/Documents/Budget/data/budget1.db"
+db_path <- "~/Documents/Budget/data/budget.db"
+options(tibble.print_max = Inf) 
 
 # --- Database Connection  ---
 con <- dbConnect(SQLite(), db_path)
