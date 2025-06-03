@@ -49,7 +49,7 @@ extract_chequing_transactions <- function(file_path, year) {
             
             # --- Filter out known non-transaction lines early ---
             if (nchar(line) < 15 || # Very short lines are unlikely to be transactions
-                grepl("statement period:|page \\d+ of \\d+|PO Box|SIMPLII FINANCIAL|Your no fee chequing account|Please note|Interest Charges|Date\\s+EffectiveDate\\s+Description|trans\\.\\s*date\\s*eff\\.\\s*date\\s*transaction\\s*funds\\s*out\\s*funds\\s*in\\s*balance", line, ignore.case = TRUE) || # Common headers/footers/table headers
+                grepl("statement period:|page \\d+ of \\d+|PO Box|Your no fee chequing account|Please note|Interest Charges|Date\\s+EffectiveDate\\s+Description|trans\\.\\s*date\\s*eff\\.\\s*date\\s*transaction\\s*funds\\s*out\\s*funds\\s*in\\s*balance", line, ignore.case = TRUE) || # Common headers/footers/table headers
                 grepl("total funds out|closing balance|end of transactions", line, ignore.case = TRUE) # Summary/info lines
             ) {
                 next

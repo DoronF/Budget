@@ -1,8 +1,11 @@
 
-
 # source
 source("extract_visa_transactions.R")
 source("extract_chequing_transactions.R")
+
+# --- Global Variables for Model ---
+model_rf_global <- NULL
+dtm_terms_global <- NULL
 
 # Ensure the database connection is closed when the script exits
 on.exit({
@@ -241,12 +244,11 @@ interactively_categorize_transactions <- function(df, default_categories, con) {
             prev_cat_id <- existing_cat_result[1, 1]
             prev_cat_id <- as.integer(prev_cat_id)
             prev_cat_name <- default_categories$category_name[default_categories$category_id == prev_cat_id]
-            cat(blue(
+            cat(
                 sprintf(
                     "Previously categorized as: %s (ID: %d)\n",
                     prev_cat_name,
                     prev_cat_id
-                )
                 )
             )
             cat(blue("----------------------------------\n"))
@@ -346,9 +348,15 @@ save_processed_data <- function(con,
                                 month,
                                 pdf_hash) {
     if (nrow(transactions_df) > 0) {
+        
+        transactions_df$date <- format(transactions_df$date, "%Y-%m-%d")
+        transactions_df$effective_date <- format(transactions_df$effective_date, "%Y-%m-%d")
+        
         transactions_df <- transactions_df %>%
+            select(date, effective_date, description, funds_out, funds_in, balance, category_id, account_id ) %>%
             mutate(file_name = basename(new_file_path))
-        print(transactions_df, n = nrow(transactions_df))
+        
+        print(transactions_df, n = nrow(transactions_df), na.print = red("N/A"))
         cat(blue("----------------------------------\n"))
         confirm <- readline("Save to database? (y/n): ")
         if (tolower(confirm) == "y") {
@@ -381,15 +389,160 @@ save_processed_data <- function(con,
 }
 
 
+# --- Model Loading ---
+# Load the model and DTM terms when the script starts
+if (file.exists(model_path) && file.exists(dtm_terms_path)) {
+    model_rf_global <<- readRDS(model_path)
+    dtm_terms_global <<- readRDS(dtm_terms_path)
+    cat(blue(
+        "\nMachine Learning Model and DTM vocabulary loaded successfully.\n"
+    ))
+} else {
+    cat(
+        red(
+            "\nWARNING: Model or DTM vocabulary not found. Automatic categorization will be skipped.\n"
+        )
+    )
+    cat(
+        red(
+            "Please train your model and save 'transaction_categorizer_rf_model.rds' and 'training_dtm_terms.rds' in the 'models/' directory.\n"
+        )
+    )
+    # If the model is not found, the `predict_categories_with_model` function will handle it by returning NA predictions.
+}
+#' Preprocesses new transaction data and predicts categories using the trained model.
+#'
+#' @param df The data frame of transactions to categorize (raw, as extracted from PDF).
+#' @param model The trained Random Forest model object.
+#' @param dtm_terms The vocabulary (column names) from the training DTM.
+#' @return A data frame with a 'predicted_category_id' column, or NA if model not available.
+
+predict_categories_with_model <- function(df, model, dtm_terms, default_categories) {
+    if (is.null(model) || is.null(dtm_terms)) {
+        cat(yellow(
+            "Model or DTM vocabulary not loaded. Skipping model prediction.\n"
+        ))
+        # Ensure consistent column names even if skipping prediction
+        return(
+            df %>% mutate(predicted_category_id = as.integer(NA)) %>%
+                rename(
+                    description = Description,
+                    funds_out = FundsOut,
+                    funds_in = FundsIn,
+                    date = Date,
+                    # Rename here!
+                    effective_date = EffectiveDate,
+                    # Rename here!
+                    balance = Balance # Rename here!
+                )
+        )
+    }
+    
+    cat(blue("\n--- Generating Model Predictions ---\n"))
+    
+    # Store original columns (with their initial names, which are likely capitalized)
+    # We will rename them to lowercase as part of the final output df
+    original_data_for_merge <- df %>%
+        select(Date,
+               EffectiveDate,
+               Balance,
+               Description,
+               FundsOut,
+               FundsIn,
+               account_id) # Capture all before renaming
+    print(original_data_for_merge)
+    # Standardize names for model input
+    df_for_model <- df %>%
+        select(Description, FundsOut, FundsIn, account_id) %>%
+        rename(description = Description,
+               funds_out = FundsOut,
+               funds_in = FundsIn)
+    
+    TEXT_COL_DB <- "description"
+    FUNDS_OUT_COL_DB <- "funds_out"
+    FUNDS_IN_COL_DB <- "funds_in"
+    ACCOUNT_ID_COL_DB <- "account_id"
+    
+    df_for_model$account_id <- as.factor(df_for_model$account_id)
+    df_for_model$funds_out <- replace_na(df_for_model$funds_out, 0)
+    df_for_model$funds_in <- as.numeric(replace_na(df_for_model$funds_in, 0))
+    
+    # Redefine preprocess_text if it's nested (though it's defined globally above)
+    # If this is copied directly from your script, the inner definition might override outer.
+    # It's better to remove the inner one if preprocess_text is global.
+    # For now, assuming it's meant to be there or it's a copy-paste artifact.
+    # If preprocess_text is defined globally, remove this nested definition:
+    preprocess_text <- function(text_vector) {
+        corpus <- VCorpus(VectorSource(text_vector))
+        corpus <- tm_map(corpus, content_transformer(tolower))
+        corpus <- tm_map(corpus, removeNumbers)
+        corpus <- tm_map(corpus, removePunctuation)
+        corpus <- tm_map(corpus, removeWords, stopwords("english"))
+        corpus <- tm_map(corpus, stripWhitespace)
+        corpus <- tm_map(corpus, stemDocument, language = "english")
+        return(corpus)
+    }
+    
+    cat("\n--- Step 1: Preprocessing Text Data ---\n")
+    preprocessed_corpus <- preprocess_text(df_for_model[[TEXT_COL_DB]])
+    
+    # 2. Create Document-Term Matrix (DTM)
+    cat("--- Step 2: Creating Document-Term Matrix (DTM) ---\n")
+    dtm <- DocumentTermMatrix(preprocessed_corpus,
+                              control = list(
+                                  weighting = function(x)
+                                      weightTfIdf(x, normalize = FALSE)
+                              ))
+    
+    text_features_df <- as.data.frame(as.matrix(dtm))
+    missing_terms <- setdiff(dtm_terms, names(text_features_df))
+    if (length(missing_terms) > 0) {
+        text_features_df[missing_terms] <- 0
+    }
+    text_features_df <- text_features_df[, dtm_terms, drop = FALSE]
+    
+    cat("\n--- Step 2: Combining all features ---\n")
+    transaction_features <- cbind(text_features_df,
+                                  df_for_model %>%
+                                      select(
+                                          !!sym(FUNDS_OUT_COL_DB),
+                                          !!sym(FUNDS_IN_COL_DB),
+                                          !!sym(ACCOUNT_ID_COL_DB)
+                                      ))
+    names(transaction_features) <- make.names(names(transaction_features))
+    
+    # 5. Make predictions
+    predictions <- predict(model, newdata = transaction_features)
+    
+    # Combine original data (now with standardized lowercase names) with predictions
+    df_with_predictions <- original_data_for_merge %>%
+        mutate(temp_row_id = row_number(),
+               category_id = as.integer(as.character(predictions))) %>%
+        # Rename all columns to lowercase to match expectations in review_and_correct_transactions
+        rename(
+            
+            date = Date,
+            effective_date = EffectiveDate,
+            description = Description,
+            funds_out = FundsOut,
+            funds_in = FundsIn,
+            balance = Balance
+        )
+    
+    # Map predicted_category_id to category_name for display
+    df_with_predictions <- df_with_predictions %>%
+        left_join(
+            default_categories %>% rename(predicted_category_name = category_name),
+            by = c("category_id" = "category_id")
+        )
+    
+    return(df_with_predictions)
+}
+
 # --- Main function to run the PDF import workflow ---
-run_pdf_import_workflow <- function() {
+run_pdf_import_workflow <- function(predict = 0) {
     # Initialize database and get categories
     default_categories <- initialize_database(con)
-    
-    # Ensure 'category_name' is present in default_categories (for the join)
-    if (!"category_name" %in% colnames(default_categories)) {
-        default_categories <- default_categories %>% rename(category_name = name)
-    }
     
     repeat {
         pdf_files <- get_pdf_files(import_dir)
@@ -473,10 +626,19 @@ run_pdf_import_workflow <- function() {
         
         # Add account_id to the transactions_df before categorization
         transactions_df$account_id <- account_id
-        
-        # Categorize transactions (initial pass)
-        categorized_transactions <- interactively_categorize_transactions(transactions_df, default_categories, con)
-        
+        if (predict == 1){
+            # Use model to predict categories
+            categorized_transactions <- predict_categories_with_model(
+                transactions_df,
+                model_rf_global,
+                dtm_terms_global,
+                default_categories # Pass default_categories for join
+            )
+        }
+        else {
+            # Categorize transactions (initial pass)
+            categorized_transactions <- interactively_categorize_transactions(transactions_df, default_categories, con)
+        }
         # --- Review and Correction Loop ---
         review_loop_active <- TRUE
         while (review_loop_active) {

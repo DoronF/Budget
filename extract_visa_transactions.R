@@ -102,6 +102,8 @@ extract_visa_transactions <- function(file_path, year) {
                         for (pattern in regex_categories_to_remove) {
                             cleaned_description <- str_replace(cleaned_description, pattern, "")
                         }
+                        
+                        cleaned_description <- str_remove(cleaned_description, "Ý")
                         cleaned_description <- str_trim(cleaned_description) # Re-trim after removal
                         
                         # all_transactions[[length(all_transactions) + 1]] <- list(
@@ -117,7 +119,7 @@ extract_visa_transactions <- function(file_path, year) {
                 
                 # --- Extract Charges and Credits ---
                 if (in_charges_section) {
-                    transaction_pattern <- "([A-Za-z]{3}\\s+\\d{1,2})\\s+([A-Za-z]{3}\\s+\\d{1,2})\\s+(.*?)\\s+([\\d,]+\\.\\d{2})$"
+                    transaction_pattern <- "([A-Za-z]{3}\\s+\\d{1,2})\\s+([A-Za-z]{3}\\s+\\d{1,2})\\s+(.*?)\\s+(-?[\\d,]+\\.\\d{2})$"
                     match <- str_match(line, transaction_pattern)
                     
                     if (!is.na(match[1,1])) { 
@@ -133,6 +135,8 @@ extract_visa_transactions <- function(file_path, year) {
                         for (pattern in regex_categories_to_remove) {
                             cleaned_description <- str_replace(cleaned_description, pattern, "")
                         }
+                        
+                        cleaned_description <- str_remove(cleaned_description, "Ý")
                         cleaned_description <- str_trim(cleaned_description) # Re-trim after removal
                         
                         amount_value <- as.numeric(str_replace_all(amount_str, ",", ""))

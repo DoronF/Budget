@@ -1,73 +1,3 @@
-# edit_transactions.R
-# This script contains functions for editing existing transactions in the database.
-
-#' Lists transactions for a given account and allows the user to select one for editing.
-#'
-#' @param con A DBI connection object.
-#' @param account_id The ID of the account to filter transactions by.
-#' @param default_categories Data frame of category IDs and names.
-#' @return The selected transaction row as a data frame, or NULL if no selection.
-select_transaction_for_editing <- function(con, account_id, default_categories) {
-    cat(blue("\n--- Select Transaction to Edit ---\n"))
-    # Fetch transactions for the selected account, ordered by date
-    transactions_df <- dbGetQuery(
-        con,
-        "SELECT id, date, description, funds_out, funds_in, category_id
-         FROM transactions
-         WHERE account_id = ?
-         ORDER BY date DESC, id DESC
-         LIMIT 50", # Limit to last 50 for readability, or allow user to search/filter
-        params = list(account_id)
-    )
-    
-    if (nrow(transactions_df) == 0) {
-        cat(yellow("No transactions found for this account.\n"))
-        return(NULL)
-    }
-    
-    # Join with categories for display
-    transactions_display <- transactions_df %>%
-        left_join(default_categories, by = "category_id") %>%
-        mutate(
-            "Txn ID" = id,
-            "Date" = date,
-            "Description" = description,
-            "Amount" = ifelse(
-                !is.na(funds_out),
-                sprintf("-$%.2f", funds_out),
-                sprintf("+$%.2f", funds_in)
-            ),
-            "Category" = ifelse(
-                is.na(category_name),
-                "UNCATEGORIZED",
-                category_name
-            )
-        ) %>%
-        select("Txn ID", "Date", "Description", "Amount", "Category")
-    
-    cat("\nRecent Transactions for Selected Account:\n")
-    print(dplyr::as_tibble(transactions_display), n = -1)
-    
-    repeat {
-        txn_id_input <- suppressWarnings(as.integer(readline(blue("Enter the 'Txn ID' to edit (0 to go back): "))))
-        if (is.na(txn_id_input)) {
-            cat(red("Invalid input. Please enter a number.\n"))
-            next
-        }
-        if (txn_id_input == 0) {
-            return(NULL) # User chose to go back
-        }
-        
-        selected_txn <- transactions_df %>% filter(id == txn_id_input)
-        if (nrow(selected_txn) == 1) {
-            return(selected_txn)
-        } else {
-            cat(red("Transaction ID not found. Please try again.\n"))
-        }
-    }
-}
-
-
 #' Main function to handle transaction editing workflow.
 #'
 #' @param con A DBI connection object.
@@ -110,6 +40,7 @@ edit_transactions <- function(con) {
         cat("2. Category\n")
         cat("3. Funds Out (Debit)\n")
         cat("4. Funds In (Credit)\n")
+        cat("5. Date\n") # New option for date
         cat("0. Cancel (Go back to transaction selection)\n")
         
         edit_choice <- suppressWarnings(as.integer(readline(blue("Enter your choice: "))))
@@ -184,12 +115,30 @@ edit_transactions <- function(con) {
                     cat(red("Invalid amount. Funds In not changed.\n"))
                 }
             },
+            "5" = { # New case for updating date
+                repeat {
+                    new_date_str <- readline(blue(sprintf("Enter new date (YYYY-MM-DD, Current: %s): ", selected_transaction$date)))
+                    # Check if the input is a valid date
+                    if (grepl("^\\d{4}-\\d{2}-\\d{2}$", new_date_str)) {
+                        # Further validate if it's a real date
+                        if (!is.na(as.Date(new_date_str, format = "%Y-%m-%d"))) {
+                            updated_value <- new_date_str
+                            update_column <- "date"
+                            break # Exit inner repeat loop if valid
+                        } else {
+                            cat(red("Invalid date format or non-existent date. Please use YYYY-MM-DD.\n"))
+                        }
+                    } else {
+                        cat(red("Invalid date format. Please use YYYY-MM-DD.\n"))
+                    }
+                }
+            },
             "0" = {
                 cat(yellow("Cancelling edit. Returning to transaction selection.\n"))
                 next # Go back to the start of the `repeat` loop for transaction selection
             },
             {
-                cat(red("Invalid choice. Please enter a number between 0 and 4.\n"))
+                cat(red("Invalid choice. Please enter a number between 0 and 5.\n"))
             }
         )
         
@@ -208,4 +157,110 @@ edit_transactions <- function(con) {
         }
     } # End of repeat loop for transaction selection
     cat(green("\nExiting Edit Transactions system. Returning to main menu.\n"))
+}
+
+#' Lists transactions for a given account and allows the user to select one for editing.
+#'
+#' @param con A DBI connection object.
+#' @param account_id The ID of the account to filter transactions by.
+#' @param default_categories Data frame of category IDs and names.
+#' @return The selected transaction row as a data frame, or NULL if no selection.
+select_transaction_for_editing <- function(con, account_id, default_categories) {
+    cat(blue("\n--- Select Transaction to Edit ---\n"))
+    
+    # --- Filtering Options ---
+    filter_sql <- " WHERE account_id = ?"
+    filter_params <- list(account_id)
+    
+    # Ask user for filtering preferences
+    cat("\nDo you want to apply filters to the transaction list?\n")
+    cat("1. Filter by Year and/or Month\n")
+    cat("2. Filter by Description (e.g., filename or keyword)\n")
+    cat("0. No filters (show recent transactions)\n")
+    
+    filter_choice <- suppressWarnings(as.integer(readline(blue("Enter your choice: "))))
+    
+    if (filter_choice == 1) {
+        # Filter by Year and Month
+        year_input <- suppressWarnings(as.integer(readline(blue("Enter year (YYYY, or 0 to skip year filter): "))))
+        month_input <- suppressWarnings(as.integer(readline(blue("Enter month (1-12, or 0 to skip month filter): "))))
+        
+        if (!is.na(year_input) && year_input > 0) {
+            filter_sql <- paste0(filter_sql, " AND STRFTIME('%Y', date) = ?")
+            filter_params <- c(filter_params, as.character(year_input))
+        }
+        
+        if (!is.na(month_input) && month_input > 0 && month_input <= 12) {
+            filter_sql <- paste0(filter_sql, " AND STRFTIME('%m', date) = ?")
+            filter_params <- c(filter_params, sprintf("%02d", month_input)) # Ensure month is two digits
+        }
+        
+    } else if (filter_choice == 2) {
+        # Filter by Description
+        search_term <- trimws(readline(blue("Enter a keyword or filename part to search in description: ")))
+        if (search_term != "") {
+            filter_sql <- paste0(filter_sql, " AND description LIKE ?")
+            filter_params <- c(filter_params, paste0("%", search_term, "%"))
+        } else {
+            cat(yellow("No search term entered. Skipping description filter.\n"))
+        }
+    } else if (filter_choice == 0) {
+        cat(blue("No filters applied. Showing recent transactions.\n"))
+    } else {
+        cat(red("Invalid filter choice. Showing recent transactions.\n"))
+    }
+    
+    # Fetch transactions for the selected account, ordered by date, with filters
+    query_sql <- paste0("SELECT id, date, description, funds_out, funds_in, category_id
+                         FROM transactions",
+                        filter_sql,
+                        " ORDER BY date DESC, id DESC") # Add LIMIT here if you want to cap the number of results, e.g., " LIMIT 100"
+    
+    transactions_df <- dbGetQuery(con, query_sql, params = filter_params)
+    
+    if (nrow(transactions_df) == 0) {
+        cat(yellow("No transactions found for this account with the applied filters.\n"))
+        return(NULL)
+    }
+    
+    # Join with categories for display
+    transactions_display <- transactions_df %>%
+        left_join(default_categories, by = "category_id") %>%
+        mutate(
+            "Txn ID" = id,
+            "Date" = date,
+            "Description" = description,
+            "Amount" = ifelse(
+                !is.na(funds_out),
+                sprintf("-$%.2f", funds_out),
+                sprintf("+$%.2f", funds_in)
+            ),
+            "Category" = ifelse(
+                is.na(category_name),
+                "UNCATEGORIZED",
+                category_name
+            )
+        ) %>%
+        select("Txn ID", "Date", "Description", "Amount", "Category")
+    
+    cat("\nTransactions for Selected Account (filtered):\n")
+    print(dplyr::as_tibble(transactions_display), n = -1)
+    
+    repeat {
+        txn_id_input <- suppressWarnings(as.integer(readline(blue("Enter the 'Txn ID' to edit (0 to go back): "))))
+        if (is.na(txn_id_input)) {
+            cat(red("Invalid input. Please enter a number.\n"))
+            next
+        }
+        if (txn_id_input == 0) {
+            return(NULL) # User chose to go back
+        }
+        
+        selected_txn <- transactions_df %>% filter(id == txn_id_input)
+        if (nrow(selected_txn) == 1) {
+            return(selected_txn)
+        } else {
+            cat(red("Transaction ID not found in the filtered list. Please try again.\n"))
+        }
+    }
 }

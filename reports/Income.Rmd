@@ -1,0 +1,229 @@
+---
+title: "Defecit and Surplus"
+author: ""
+date: "`r format(Sys.Date(), '%Y-%m-%d')`"
+output:
+  html_document:
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, message = FALSE, warning = FALSE, fig.width = 10, fig.height = 6)
+
+# Load necessary libraries
+library(DBI)
+library(RSQLite)
+library(dplyr)
+library(ggplot2)
+library(tidyr)
+library(lubridate)
+library(scales) # For currency formatting
+library(forcats) # For fct_reorder
+library(patchwork) # For arranging plots
+
+
+# --- Database Connection ---
+db_path <- "~/Documents/Budget/data/budget.db" 
+con <- dbConnect(RSQLite::SQLite(), dbname = db_path)
+
+
+
+# Define colors for plots (optional, but good for consistency)
+my_colors <- c("#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd", "#8c564b", "#e377b2", "#7f7f7f", "#bcbd22", "#17becf")
+
+# --- Helper function to get account names ---
+get_account_names <- function(con) {
+  dbGetQuery(con, "SELECT account_id, account_name FROM accounts")
+}
+
+# --- Helper function to get category names ---
+get_category_names <- function(con) {
+  dbGetQuery(con, "SELECT category_id, category_name FROM categories")
+}
+
+# Fetch data for the report
+transactions_raw <- dbGetQuery(con, "SELECT * FROM transactions")
+accounts_df <- get_account_names(con)
+categories_df <- get_category_names(con)
+dbDisconnect(con) 
+
+```
+
+
+
+```{r }
+
+
+# Process data for reporting
+transactions_processed <- transactions_raw %>%
+  left_join(accounts_df, by = "account_id") %>%
+  left_join(categories_df, by = "category_id") %>%
+  mutate(
+    date = ymd(date), # Convert date column to Date object
+    year = lubridate::year(date),
+    month = lubridate::month(date, label = TRUE, abbr = FALSE), # Full month name
+    month_num = lubridate::month(date)
+    # No total_amount here, we'll calculate income and expenses separately
+  )
+
+# --- Define Expense and Income DataFrames ---
+
+expenses_df <- transactions_processed %>%
+  filter(account_id != 2, # ignore saving account
+         !category_id %in% c(19,18,17,13)) 
+    # Exclude: 19 - Credit payment already itemized from credit statements
+    # 18 - Investing, 17 - Saving, 13 - transfers out
+
+
+# Aggregate monthly expenses
+monthly_expenses <- expenses_df %>%
+  group_by(year, month, month_num) %>%
+  summarise(amount = sum(funds_out, na.rm = TRUE) - sum(funds_in, na.rm = TRUE), type = "Expenses")
+
+
+income_df <- transactions_processed %>%
+  #filter(funds_in > 0) %>% # funds_in are not NA
+  filter(account_id != 2 , # exclude saving account
+         category_id == 13, # only consider income category
+         description != 'TRANSFER IN') # Exclude transfers from savings
+
+# Aggregate monthly income
+monthly_income <- income_df %>%
+  group_by(year, month, month_num) %>%
+  summarise(amount = sum(funds_in, na.rm = TRUE) , type = "Income")
+
+```
+
+### Monthly Income vs. Expenses (Stacked Bar)
+
+```{r monthly-income-expense-stacked-bar, fig.cap="Monthly Income vs. Expenses"}
+
+
+
+# Combine for plotting
+monthly_summary <- bind_rows(monthly_income, monthly_expenses) %>%
+  mutate(date_ym = ymd(paste0(year, "-", month_num, "-01"))) %>%
+  arrange(date_ym, type)
+
+net_cash_flow <- full_join(
+    monthly_income %>% select(year, month, month_num, Income = amount),
+    monthly_expenses %>% select(year, month, month_num, Expenses = amount),
+    by = c("year", "month", "month_num")
+  ) %>%
+  mutate(
+    Income = replace_na(Income, 0),    # Replace NA with 0 for months with no income
+    Expenses = replace_na(Expenses, 0),# Replace NA with 0 for months with no expenses
+    net_flow = Income - Expenses,
+    date_ym = ymd(paste0(year, "-", month_num, "-01"))
+  ) %>%
+  arrange(date_ym)
+
+
+ggplot(monthly_summary, aes(x = date_ym, y = amount, fill = type)) +
+  geom_bar(stat = "identity", position = "dodge") + # Use 'dodge' to put bars side-by-side
+  scale_y_continuous(labels = scales::dollar) +
+  scale_x_date(date_breaks = "3 months", date_labels = "%b %Y") +
+  scale_fill_manual(values = c("Income" = my_colors[3], "Expenses" = my_colors[4])) + # Green for income, red for expenses
+  labs(
+    title = "Monthly Income vs. Expenses",
+    x = "Month",
+    y = "Amount",
+    fill = "Type"
+  ) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+```{r monthly-net-cash-flow-single-line-corrected, fig.cap="Monthly Net Cash Flow Over Time (Surplus Green, Deficit Red)"}
+
+net_cash_flow_segments <- net_cash_flow %>%
+  # Arrange by date to ensure correct segment order
+  arrange(date_ym) %>%
+  # For each month, get the net_flow of the *next* month to define the end of the segment
+  mutate(
+    net_flow_next = lead(net_flow),
+    date_ym_next = lead(date_ym)
+  ) %>%
+  # Remove the last row as it won't have a 'next' month
+  filter(!is.na(net_flow_next)) %>%
+  # Determine the color based on the START of the segment (or you could use the end, or average)
+  mutate(segment_color = ifelse(net_flow >= 0, "Surplus", "Deficit"))
+
+ggplot(net_cash_flow_segments) +
+  # Draw the line segments
+  geom_segment(aes(x = date_ym, y = net_flow, xend = date_ym_next, yend = net_flow_next, color = segment_color),
+               linewidth = 1.2) + # Increased linewidth for better visibility
+  # Add points at each month for clarity
+  geom_point(aes(x = date_ym, y = net_flow, color = ifelse(net_flow >= 0, "Surplus", "Deficit")),
+             size = 2.5) +
+  # Add point for the very last month (which is not part of a segment 'start')
+  geom_point(data = net_cash_flow %>% slice_tail(n = 1), # Get the last row from the original data
+             aes(x = date_ym, y = net_flow, color = ifelse(net_flow >= 0, "Surplus", "Deficit")),
+             size = 2.5) +
+  scale_color_manual(values = c("Surplus" = my_colors[3], "Deficit" = my_colors[4])) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "grey50") + # Zero line
+  scale_y_continuous(labels = scales::dollar) +
+  scale_x_date(date_breaks = "3 months", date_labels = "%b %Y") +
+  labs(
+    title = "Monthly Net Cash Flow Over Time",
+    subtitle = "Positive flow (Surplus) in green, Negative flow (Deficit) in red.",
+    x = "Month",
+    y = "Net Cash Flow",
+    color = "Status"
+  ) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+
+
+### Monthly Net Cash Flow Summary Table
+
+```{r monthly-net-cash-flow-table, fig.cap="Monthly Net Cash Flow Summary"}
+
+# Prepare the data for the table:
+# - Select relevant columns
+# - Format numbers as currency
+# - Create 'Surplus' and 'Deficit' columns based on net_flow
+cash_flow_table_data <- net_cash_flow %>%
+  mutate(
+    Month = date_ym,
+    Surplus = ifelse(net_flow >= 0, scales::dollar(net_flow), "-"),
+    Deficit = ifelse(net_flow < 0, scales::dollar(abs(net_flow)), "-") # Use absolute value for deficit
+  ) %>%
+ select(Surplus, Deficit) # Ensure chronological order in the table
+
+# Display the table using knitr::kable
+knitr::kable(cash_flow_table_data,
+             caption = "Summary of Monthly Net Cash Flow",
+             align = c('l', 'r', 'r')) # Left align Year/Month, Right align Surplus/Deficit
+```
+
+### Savings Account Balance Trend
+
+```{r savings-account-balance-plot, fig.cap="Savings Account Balance Over Time (Account ID: 2)"}
+# Identify the savings account ID (you've specified 2)
+savings_account_id <- 2
+
+savings_transactions_processed <- transactions_raw %>%
+    filter(account_id == 2) %>%
+    mutate(date = ymd(date))
+
+if (nrow(savings_transactions_processed) == 0) {
+  message("No transactions found for Savings Account (ID: 2). Cannot generate balance plot.")
+} else {
+  ggplot(savings_transactions_processed, aes(x = date, y = balance)) +
+    geom_line(color = my_colors[5], linewidth = 1.2) + # A distinct color for savings
+    geom_point(color = my_colors[5], size = 2.5, alpha = 0.8) +
+    scale_y_continuous(labels = scales::dollar) +
+    scale_x_date(date_breaks = "3 months", date_labels = "%b %Y") +
+    expand_limits(y = 0) +
+    labs(
+      title = paste("Savings Account Balance Over Time (Account ID:", savings_account_id, ")"),
+      x = "Date",
+      y = "Account Balance"
+    ) +
+    theme_minimal() +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1))
+}
+```
+

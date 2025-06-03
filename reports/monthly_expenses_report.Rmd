@@ -1,0 +1,343 @@
+---
+title: "Expenses Overview"
+author: ""
+date: "`r format(Sys.Date(), '%Y-%m-%d')`"
+output:
+  html_document:
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, message = FALSE, warning = FALSE, fig.width = 10, fig.height = 6)
+
+# Load necessary libraries
+library(DBI)
+library(RSQLite)
+library(dplyr)
+library(ggplot2)
+library(tidyr)
+library(lubridate)
+library(scales) # For currency formatting
+library(forcats)
+library(patchwork) 
+library(RColorBrewer)
+
+# --- Database Connection ---
+db_path <- "~/Documents/Budget/data/budget.db"
+con <- dbConnect(RSQLite::SQLite(), dbname = db_path)
+
+# Define colors for plots (optional, but good for consistency)
+my_colors <- c("#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd", "#8c564b", "#e377c2", "#7f7f7f", "#bcbd22", "#17becf")
+
+# --- Helper function to get account names ---
+get_account_names <- function(con) {
+  dbGetQuery(con, "SELECT account_id, account_name FROM accounts")
+}
+
+# --- Helper function to get category names ---
+get_category_names <- function(con) {
+  dbGetQuery(con, "SELECT category_id, category_name FROM categories")
+}
+
+# Fetch data for the report
+transactions_raw <- dbGetQuery(con, "SELECT * FROM transactions")
+accounts_df <- get_account_names(con)
+categories_df <- get_category_names(con)
+
+# Process data for reporting
+transactions_processed <- transactions_raw %>%
+    filter(category_id != 19, account_id != 2 ) %>%
+  left_join(accounts_df, by = "account_id") %>%
+  left_join(categories_df, by = "category_id") %>%
+  mutate(
+    date = ymd(date), # Convert date column to Date object
+    year = year(date),
+    month = month(date, label = TRUE, abbr = FALSE), # Full month name
+    month_num = month(date),
+    total_amount =  funds_out - funds_in# Combine funds_in and funds_out into a single 'amount'
+  )
+
+
+#transactions_processed <- transactions_processed %>%
+#    filter(between(date, max(date) - months(12), max(date)))
+
+expenses_df <- transactions_processed %>%
+  filter(account_id != 2, # ignore saving account
+         !category_id %in% c(19,18,17,13)) 
+    # Exclude: 19 - Credit payment already itemized from credit statements
+    # 18 - Investing, 17 - Saving, 13 - transfers out
+
+savings_transactions <- transactions_processed %>%
+    filter(account_id == 2)
+
+
+
+income_df <- transactions_processed %>%
+  #filter(funds_in > 0) %>% # funds_in are not NA
+  filter(account_id != 2 , # exclude saving account
+         category_id == 13, # only consider income category
+         description != 'TRANSFER IN') # Exclude transfers from savings
+
+
+```
+
+
+### Monthly Expenses Breakdown by Category
+
+```{r monthly-expenses-by-category-stacked, fig.cap="Monthly Expenses Breakdown by Category (Stacked Bar)"}
+# Data preparation:
+# We need 'expenses_df' which has individual transactions with category_name and funds_out.
+# Then, aggregate by month and category.
+
+# Aggregate monthly income
+monthly_income <- income_df %>%
+  group_by(year, month, month_num) %>%
+  summarise(amount = sum(funds_in, na.rm = TRUE), type = "Income")
+
+# Aggregate monthly expenses
+monthly_expenses <- expenses_df %>%
+  group_by(year, month, month_num) %>%
+  summarise(amount = sum(funds_out, na.rm = TRUE) - sum (funds_in, na.rm = TRUE), type = "Expenses")
+
+# Combine for plotting
+monthly_summary <- bind_rows(monthly_income, monthly_expenses) %>%
+  mutate(date_ym = ymd(paste0(year, "-", month_num, "-01"))) %>%
+  arrange(date_ym, type)
+
+net_cash_flow <- full_join(
+    monthly_income %>% select(year, month, month_num, Income = amount),
+    monthly_expenses %>% select(year, month, month_num, Expenses = amount),
+    by = c("year", "month", "month_num")
+  ) %>%
+  mutate(
+    Income = replace_na(Income, 0),    # Replace NA with 0 for months with no income
+    Expenses = replace_na(Expenses, 0),# Replace NA with 0 for months with no expenses
+    net_flow = Income - Expenses,
+    date_ym = ymd(paste0(year, "-", month_num, "-01"))
+  ) %>%
+  arrange(date_ym)
+
+
+
+monthly_category_expenses_stacked <- expenses_df %>%
+  # Make sure report_year, report_month, report_month_num are used if you renamed them
+  group_by(year, month,  category_name) %>%
+  summarise(total_spent = sum(funds_out, na.rm = TRUE)) %>%
+  ungroup() %>%
+  mutate(date_ym = ymd(paste0(year, "-", month, "-01"))) %>% # Create date for x-axis
+  arrange(date_ym, category_name) # Arrange for consistent stacking order (optional but good practice)
+
+# Filter out categories that are always 0 or have very minimal spending to keep the plot clean
+# You might want to adjust this filter based on your data, e.g., filter(total_spent > 5)
+# Or, focus on top N categories over the entire period to ensure consistency across months.
+
+# For consistent colors and order, let's get the overall top categories by total spending
+# and use them to define the factor levels for category_name.
+# This prevents colors/stacking order from jumping around if some categories
+# are only present in a few months.
+ordered_categories <- expenses_df %>%
+  group_by(category_name) %>%
+  summarise(overall_total_spent = sum(funds_out, na.rm = TRUE)) %>%
+  arrange(desc(overall_total_spent)) %>%
+  pull(category_name)
+
+monthly_category_expenses_stacked <- monthly_category_expenses_stacked %>%
+  mutate(category_name = factor(category_name, levels = ordered_categories)) # Set factor levels
+
+ggplot(monthly_category_expenses_stacked, aes(x = date_ym, y = total_spent, fill = category_name)) +
+  geom_bar(stat = "identity", position = "stack") + # THIS IS THE KEY: position = "stack"
+  scale_y_continuous(labels = scales::dollar, expand = expansion(mult = c(0, 0.05))) + # Ensure y-axis starts at 0
+  scale_x_date(date_breaks = "3 months", date_labels = "%b %Y") +
+  scale_fill_viridis_d(option = "D") + # Using a discrete Viridis color palette for more distinct colors
+  labs(
+    title = "Monthly Expenses Breakdown by Category",
+    x = "Month",
+    y = "Total Monthly Expenses",
+    fill = "Category"
+  ) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+
+```{r}
+yearly_total_expenses <- expenses_df %>%
+  #  filter(category_id != 19, account_id != 2 , category_id != 13, is.na(funds_in)) %>%
+  group_by(year) %>%
+  summarise(total_expenses = sum(funds_out, na.rm = TRUE)-sum(funds_in, na.rm = TRUE)) %>%
+  ungroup()
+
+ggplot(yearly_total_expenses, aes(x = factor(year), y = total_expenses)) +
+  geom_bar(stat = "identity", fill = my_colors[2]) +
+  geom_text(aes(label = scales::dollar(total_expenses)), vjust = -0.5, size = 3) +
+  scale_y_continuous(labels = scales::dollar) +
+  labs(
+    title = "Total Yearly Expenses",
+    x = "Month",
+    y = "Total Expenses"
+  ) +
+  theme_minimal()
+```
+
+
+```{r}
+top_categories <- expenses_df %>%
+  group_by(category_name) %>%
+  summarise(total_spent = sum(funds_out, na.rm = TRUE)- sum(funds_in, na.rm = TRUE)) %>%
+  arrange(desc(total_spent)) %>%
+  head(10) %>% # Show top 10 categories
+  ungroup()
+
+ggplot(top_categories, aes(x = reorder(category_name, total_spent), y = total_spent)) +
+  geom_bar(stat = "identity", fill = my_colors[3]) +
+  geom_text(aes(label = scales::dollar(total_spent)), hjust = -0.1, size = 3) +
+  scale_y_continuous(labels = scales::dollar) +
+  labs(
+    title = "Top 10 Spending Categories (Overall)",
+    x = "Category",
+    y = "Total Amount Spent"
+  ) +
+  coord_flip() + # Flip coordinates for better readability of category names
+  theme_minimal()
+```
+
+
+
+```{r}
+# Identify the top N categories to focus on for monthly trends
+top_N_category_names <- expenses_df %>%
+  group_by(category_name) %>%
+  summarise(total_spent = sum(funds_out, na.rm = TRUE)) %>%
+  arrange(desc(total_spent)) %>%
+  head(10) %>%
+  pull(category_name)
+
+monthly_category_expenses <- expenses_df %>%
+  filter(category_name %in% top_N_category_names) %>%
+  group_by(year, month, month_num, category_name) %>%
+  summarise(total_expenses = sum(funds_out, na.rm = TRUE)) %>%
+  ungroup() %>%
+  mutate(date_ym = ymd(paste0(year, "-", month_num, "-01"))) %>%
+    arrange(desc(total_expenses))# Create a date for plotting
+
+ggplot(monthly_category_expenses, aes(x = date_ym, y = total_expenses, fill = category_name)) +
+  geom_area(position = "stack", alpha = 0.8) + # Stacked area chart
+  scale_y_continuous(labels = scales::dollar) +
+  scale_x_date(date_breaks = "6 months", date_labels = "%b %Y") +
+  scale_fill_manual(values = my_colors) +
+  labs(
+    title = "Monthly Spending by Top 5 Categories",
+    x = "Month",
+    y = "Total Expenses",
+    fill = "Category"
+  ) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+```{r}
+# Filter out categories with very few transactions, as boxplots might not be meaningful
+# Or focus on categories that typically have varying expenses
+meaningful_categories <- expenses_df %>%
+  group_by(category_name) %>%
+  summarise(n_transactions = n(), avg_amount = mean(funds_out, na.rm = TRUE)) %>%
+ # filter(n_transactions > 5 & avg_amount > 10) %>% # Adjust thresholds as needed
+  pull(category_name)
+
+expenses_for_outliers <- expenses_df %>%
+  filter(category_name %in% meaningful_categories, funds_out > 0) %>%
+  mutate(category_name = fct_reorder(category_name, funds_out, .fun = median, .desc = TRUE)) # Order by median expense
+
+ggplot(expenses_for_outliers, aes(x = category_name, y = funds_out)) +
+  geom_boxplot(fill = my_colors[4], alpha = 0.7) +
+  geom_jitter(width = 0.2, alpha = 0.3, color = "black") + # Show individual points
+  scale_y_continuous(labels = scales::dollar) +
+  labs(
+    title = "Outlier Detection: Expense Distribution by Category",
+    subtitle = "Points outside the whiskers are potential outliers.",
+    x = "Category",
+    y = "Transaction Amount"
+  ) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+```{r}
+# Identify transactions that are significantly larger than the average for their category
+# Define "significant" - e.g., > 3 standard deviations above the mean, or simply top N largest
+outlier_transactions <- expenses_df %>%
+  # Filter out categories that might naturally have very high, infrequent transactions (e.g., "Mortgage Principal")
+  # Or simply list the largest overall
+  arrange(desc(funds_out)) %>%
+  head(10) %>% # Get the top 10 largest expenses
+  select(date, description, funds_out, category_name, account_name) %>%
+  mutate(funds_out = scales::dollar(funds_out)) # Format for display
+
+knitr::kable(outlier_transactions, caption = "Top 10 Largest Expense Transactions")
+```
+
+
+
+## Monthly Category Deep Dive
+
+
+```{r monthly-category-grid, fig.width=15, fig.height=7, fig.cap="Categorized Expenses for Selected Months"}
+# Determine the most recent distinct months available in your data
+# This will pick up to 3 most recent months with expenses
+recent_months_data <- expenses_df %>%
+  arrange(desc(date)) %>%
+  distinct(year, month, month_num) %>%
+  head(12) # Get the 3 most recent unique months
+
+# Initialize a list to store the plots
+plot_list <- list()
+
+if (nrow(recent_months_data) == 0) {
+  message("No expense data available to create monthly category plots.")
+} else {
+  for (i in 1:nrow(recent_months_data)) {
+    current_year <- recent_months_data$year[i]
+    current_month_name <- recent_months_data$month[i]
+    current_month_num <- recent_months_data$month_num[i]
+
+    # Filter data for the current month and aggregate
+    monthly_category_summary <- expenses_df %>%
+      filter(year == current_year, month_num == current_month_num) %>%
+      group_by(category_name) %>%
+      summarise(total_spent = sum(funds_out, na.rm = TRUE)) %>%
+      ungroup() %>%
+      arrange(desc(total_spent)) %>%
+      head(7) %>% # Show top 7 categories for the month for clarity
+      mutate(category_name = fct_reorder(category_name, total_spent)) # Reorder for bar plot
+
+    # Create the plot for the current month
+    p <- ggplot(monthly_category_summary, aes(x = category_name, y = total_spent)) +
+      geom_bar(stat = "identity", fill = my_colors[i %% length(my_colors) + 1]) + # Cycle through colors
+      scale_y_continuous(labels = scales::dollar) +
+      labs(
+        title = paste(current_month_name, current_year),
+        x = NULL, # No x-axis label for categories
+        y = "Amount Spent"
+      ) +
+      coord_flip() +
+      theme_minimal() +
+      theme(
+        plot.title = element_text(hjust = 0.5, size = 12),
+        axis.text.y = element_text(size = 9),
+        axis.text.x = element_text(size = 8),
+        axis.title.x = element_text(size = 9),
+        panel.grid.major.y = element_blank(), # Remove horizontal grid lines
+        panel.grid.minor.y = element_blank()
+      )
+
+    plot_list[[i]] <- p
+  }
+
+  # Combine plots using patchwork
+  # Use reduce() with `+` for patchwork to combine them dynamically
+  # .wrap_plots ensures that if there are fewer than 3 months, it still lays them out nicely
+  if (length(plot_list) > 0) {
+    wrap_plots(plot_list) &
+    theme(plot.margin = unit(c(5.5, 5.5, 5.5, 5.5), "pt")) # Adjust margins if plots feel too cramped
+  }
+}
+```
