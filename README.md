@@ -10,6 +10,7 @@ This repository contains an R script designed to automate the import, categoriza
 - **Interactive Categorization**: Guides the user through assigning categories to transactions, leveraging past categorizations for similar descriptions to suggest defaults.
 - **Review and Correction**: Allows users to review categorized transactions and correct any miscategorizations before saving.
 - **Organized Storage**: Moves processed PDF statements to a structured `statements` directory, organized by account, year, and month.
+- **ML prediction**: Using Random Forest classification to predict category and and streamline the importing process.
 
 ## Prerequisites
 
